@@ -81,6 +81,20 @@ export function DashboardClient({
     return transactions.filter((t) => t.machine_id === selectedMachine);
   }, [transactions, selectedMachine]);
 
+  // แปลง machine_id (รหัส token ยาวๆ) เป็นชื่อตู้ที่อ่านง่าย เช่น "Raspberry Pi ตู้ 1"
+  // (ชื่อนี้มาจากตาราง tarot_machines คอลัมน์ name - gateway อัปเดตให้อัตโนมัติทุกครั้งที่มี
+  // ธุรกรรมเข้ามา โดยใช้ชื่อที่ตั้งไว้ตอนสร้าง license) ถ้าหาไม่เจอ (ยังไม่เคยลงทะเบียน) ให้
+  // โชว์ machine_id ดิบๆ ไปก่อนเป็น fallback
+  const machineNameMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    machines.forEach((m) => {
+      map[m.machine_id] = m.name;
+    });
+    return map;
+  }, [machines]);
+
+  const machineLabel = (machineId: string) => machineNameMap[machineId] ?? machineId;
+
   const todayTopups = filtered.filter(
     (t) => t.kind === "topup" && t.status === "completed" && isToday(t.created_at)
   );
@@ -248,7 +262,7 @@ export function DashboardClient({
                     <td className="py-2 pr-2 text-slate-400">
                       {t.language ? LANGUAGE_LABELS[t.language] : "—"}
                     </td>
-                    <td className="py-2 text-slate-400">{t.machine_id}</td>
+                    <td className="py-2 text-slate-400">{machineLabel(t.machine_id)}</td>
                   </tr>
                 ))}
                 {filtered.length === 0 && (
