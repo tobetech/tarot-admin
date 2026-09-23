@@ -54,25 +54,43 @@ export function DashboardClient({
   // ให้เอามาต่อหน้าลิสต์ทันที ไม่ต้อง refresh หน้าเว็บ
   useEffect(() => {
     const supabase = createClient();
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    let cancelled = false;
 
-    const channel = supabase
-      .channel("transactions-realtime")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "tarot_transactions" },
-        (payload) => {
-          setTransactions((prev) => [
-            payload.new as Transaction,
-            ...prev,
-          ].slice(0, 500));
-        }
-      )
-      .subscribe((status) => {
-        setConnected(status === "SUBSCRIBED");
-      });
+    // สำคัญ: ต้องส่ง access_token ของผู้ใช้ที่ login อยู่ให้ตัว realtime รู้จักก่อน subscribe
+    // เสมอ ไม่งั้น realtime จะต่อด้วยสิทธิ์ "anon" (ยังไม่ login) แทน ซึ่งตาราง
+    // tarot_transactions ตั้ง RLS ไว้ให้อ่านได้เฉพาะ "authenticated" เท่านั้น - ถ้าข้ามขั้นตอนนี้
+    // ปุ่มสถานะจะขึ้นเขียว "เชื่อมต่อแล้ว" ได้ปกติ แต่ database จะไม่ส่งข้อมูลใหม่มาให้เลยเงียบๆ
+    // (ต้อง refresh หน้าถึงจะเห็น เพราะตอน refresh ไปดึงข้อมูลผ่าน server-side ที่ใช้สิทธิ์ถูกต้องอยู่แล้ว)
+    (async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (cancelled) return;
+      if (session?.access_token) {
+        supabase.realtime.setAuth(session.access_token);
+      }
+
+      channel = supabase
+        .channel("transactions-realtime")
+        .on(
+          "postgres_changes",
+          { event: "INSERT", schema: "public", table: "tarot_transactions" },
+          (payload) => {
+            setTransactions((prev) => [
+              payload.new as Transaction,
+              ...prev,
+            ].slice(0, 500));
+          }
+        )
+        .subscribe((status) => {
+          setConnected(status === "SUBSCRIBED");
+        });
+    })();
 
     return () => {
-      supabase.removeChannel(channel);
+      cancelled = true;
+      if (channel) supabase.removeChannel(channel);
     };
   }, []);
 
