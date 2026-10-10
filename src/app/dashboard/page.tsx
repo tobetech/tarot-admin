@@ -1,25 +1,14 @@
 import { createClient } from "@/lib/supabase/server";
 import { DashboardClient } from "@/components/DashboardClient";
-import type { Machine, Transaction } from "@/lib/types";
+import type { Machine } from "@/lib/types";
 
-// ดึงข้อมูลตั้งต้นฝั่ง server ก่อน render (เร็วกว่ารอโหลดฝั่ง client ทีหลัง)
-// จากนั้น DashboardClient จะสมัคร realtime ต่อจากจุดนี้เอง
+// ดึงรายชื่อตู้ฝั่ง server ก่อน render ส่วนธุรกรรมให้ DashboardClient โหลดเองตามช่วงเวลาที่เลือก
 export default async function DashboardPage() {
   const supabase = await createClient();
+  const { data: machines } = await supabase
+    .from("tarot_machines")
+    .select("*")
+    .order("name");
 
-  const [{ data: transactions }, { data: machines }] = await Promise.all([
-    supabase
-      .from("tarot_transactions")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(500),
-    supabase.from("tarot_machines").select("*").order("name"),
-  ]);
-
-  return (
-    <DashboardClient
-      initialTransactions={(transactions as Transaction[]) ?? []}
-      machines={(machines as Machine[]) ?? []}
-    />
-  );
+  return <DashboardClient machines={(machines as Machine[]) ?? []} />;
 }

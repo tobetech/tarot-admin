@@ -1,300 +1,459 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import {
   LANGUAGE_LABELS,
+  TOPIC_LABELS,
   PAYMENT_METHOD_LABELS,
   type Machine,
   type Transaction,
 } from "@/lib/types";
+import {
+  THB,
+  bkkDate,
+  dayRange,
+  formatDateTime,
+  nextDayIso,
+  sinceStartOfDay,
+  startOfDateIso,
+} from "@/lib/format";
 import { StatCard } from "@/components/StatCard";
-import { BreakdownChart } from "@/components/BreakdownChart";
-import { RevenueChart } from "@/components/RevenueChart";
+import {
+  COLORS,
+  ChartCard,
+  ColoredPie,
+  DailyLineChart,
+  HBarChart,
+} from "@/components/Charts";
+import { LicenseTab } from "@/components/LicenseTab";
 
-const THB = new Intl.NumberFormat("th-TH", {
-  style: "currency",
-  currency: "THB",
-  maximumFractionDigits: 0,
-});
+const PERIODS = [
+  { id: "7", label: "7 วันล่าสุด", days: 7 },
+  { id: "1", label: "วันนี้", days: 1 },
+  { id: "30", label: "30 วันล่าสุด", days: 30 },
+  { id: "90", label: "90 วันล่าสุด", days: 90 },
+  { id: "all", label: "ทั้งหมด", days: 0 },
+  { id: "custom", label: "เลือกวันที่จากปฏิทิน...", days: 0 },
+];
 
-function isToday(iso: string) {
-  const d = new Date(iso);
-  const now = new Date();
-  return (
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate()
-  );
-}
+const PAGE = 1000; // Supabase ตอบกลับสูงสุด 1000 แถวต่อครั้ง จึงดึงเป็นหน้าๆ
+const MAX_ROWS = 20000;
 
-function formatTime(iso: string) {
-  return new Date(iso).toLocaleString("th-TH", {
-    hour: "2-digit",
-    minute: "2-digit",
-    day: "2-digit",
-    month: "2-digit",
-  });
-}
+const selectClass =
+  "rounded-xl border border-[#2a2d36] bg-[#181a20] px-4 py-3 text-slate-100 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/50";
+const darkBtn =
+  "rounded-xl border border-[#2a2d36] bg-[#1c1e26] px-5 py-3 font-semibold text-slate-100 transition hover:bg-[#252833]";
 
-export function DashboardClient({
-  initialTransactions,
-  machines,
-}: {
-  initialTransactions: Transaction[];
-  machines: Machine[];
-}) {
-  const [transactions, setTransactions] = useState<Transaction[]>(
-    initialTransactions
-  );
-  const [selectedMachine, setSelectedMachine] = useState<string>("all");
-  const [connected, setConnected] = useState(false);
+export function DashboardClient({ machines }: { machines: Machine[] }) {
+  const [tab, setTab] = useState<"sales" | "license">("sales");
+  const [period, setPeriod] = useState("7");
+  const [machine, setMachine] = useState("all");
+  const today = bkkDate(new Date());
+  const [fromDate, setFromDate] = useState(today);
+  const [toDate, setToDate] = useState(today);
+  const [rows, setRows] = useState<Transaction[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // สมัคร realtime: ทุกครั้งที่มีแถวใหม่ถูก insert ในตาราง transactions
-  // ให้เอามาต่อหน้าลิสต์ทันที ไม่ต้อง refresh หน้าเว็บ
+  // ช่วงเวลาที่เลือก: since (รวม) ถึง until (ไม่รวม) ถ้าเป็น null = ไม่จำกัด
+  const { since, until } = useMemo(() => {
+    if (period === "custom") {
+      const a = fromDate <= toDate ? fromDate : toDate;
+      const b = fromDate <= toDate ? toDate : fromDate;
+      return { since: startOfDateIso(a), until: nextDayIso(b) };
+    }
+    const p = PERIODS.find((x) => x.id === period);
+    return { since: p && p.days > 0 ? sinceStartOfDay(p.days) : null, until: null as string | null };
+  }, [period, fromDate, toDate]);
+
+  // ดึงรายการรับเงิน (topup) และการเริ่มทำนาย (reading) ที่สำเร็จแล้ว ตามช่วงเวลาที่เลือก
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    const supabase = createClient();
+    const all: Transaction[] = [];
+    for (let from = 0; from < MAX_ROWS; from += PAGE) {
+      let q = supabase
+        .from("tarot_transactions")
+        .select("*")
+        .in("kind", ["topup", "reading"])
+        .eq("status", "completed")
+        .order("created_at", { ascending: false })
+        .range(from, from + PAGE - 1);
+      if (since) q = q.gte("created_at", since);
+      if (until) q = q.lt("created_at", until);
+      const { data, error: err } = await q;
+      if (err) {
+        setError(err.message);
+        break;
+      }
+      all.push(...((data as Transaction[]) ?? []));
+      if (!data || data.length < PAGE) break;
+    }
+    setRows(all);
+    setLoading(false);
+  }, [since, until]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // realtime: มีรายการใหม่เข้ามา ให้เพิ่มต่อหัวลิสต์ทันที (ถ้าอยู่ในช่วงเวลาที่เลือก)
   useEffect(() => {
     const supabase = createClient();
     let channel: ReturnType<typeof supabase.channel> | null = null;
     let cancelled = false;
 
-    // สำคัญ: ต้องส่ง access_token ของผู้ใช้ที่ login อยู่ให้ตัว realtime รู้จักก่อน subscribe
-    // เสมอ ไม่งั้น realtime จะต่อด้วยสิทธิ์ "anon" (ยังไม่ login) แทน ซึ่งตาราง
-    // tarot_transactions ตั้ง RLS ไว้ให้อ่านได้เฉพาะ "authenticated" เท่านั้น - ถ้าข้ามขั้นตอนนี้
-    // ปุ่มสถานะจะขึ้นเขียว "เชื่อมต่อแล้ว" ได้ปกติ แต่ database จะไม่ส่งข้อมูลใหม่มาให้เลยเงียบๆ
-    // (ต้อง refresh หน้าถึงจะเห็น เพราะตอน refresh ไปดึงข้อมูลผ่าน server-side ที่ใช้สิทธิ์ถูกต้องอยู่แล้ว)
+    // ต้องส่ง access_token ของผู้ใช้ที่ login ให้ realtime ก่อน subscribe เสมอ
+    // ไม่งั้นจะต่อด้วยสิทธิ์ anon ซึ่งอ่านตารางที่ตั้ง RLS ไว้ไม่ได้ (เงียบๆ ไม่มี error)
     (async () => {
       const {
         data: { session },
       } = await supabase.auth.getSession();
       if (cancelled) return;
-      if (session?.access_token) {
-        supabase.realtime.setAuth(session.access_token);
-      }
-
+      if (session?.access_token) supabase.realtime.setAuth(session.access_token);
       channel = supabase
         .channel("transactions-realtime")
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "tarot_transactions" },
           (payload) => {
-            setTransactions((prev) => [
-              payload.new as Transaction,
-              ...prev,
-            ].slice(0, 500));
+            const t = payload.new as Transaction;
+            if (t.status !== "completed") return;
+            if (since && t.created_at < since) return;
+            if (until && t.created_at >= until) return;
+            setRows((prev) => [t, ...prev]);
           }
         )
-        .subscribe((status) => {
-          setConnected(status === "SUBSCRIBED");
-        });
+        .subscribe();
     })();
 
     return () => {
       cancelled = true;
       if (channel) supabase.removeChannel(channel);
     };
-  }, []);
+  }, [since, until]);
 
-  const filtered = useMemo(() => {
-    if (selectedMachine === "all") return transactions;
-    return transactions.filter((t) => t.machine_id === selectedMachine);
-  }, [transactions, selectedMachine]);
-
-  // แปลง machine_id (รหัส token ยาวๆ) เป็นชื่อตู้ที่อ่านง่าย เช่น "Raspberry Pi ตู้ 1"
-  // (ชื่อนี้มาจากตาราง tarot_machines คอลัมน์ name - gateway อัปเดตให้อัตโนมัติทุกครั้งที่มี
-  // ธุรกรรมเข้ามา โดยใช้ชื่อที่ตั้งไว้ตอนสร้าง license) ถ้าหาไม่เจอ (ยังไม่เคยลงทะเบียน) ให้
-  // โชว์ machine_id ดิบๆ ไปก่อนเป็น fallback
-  const machineNameMap = useMemo(() => {
+  const machineName = useMemo(() => {
     const map: Record<string, string> = {};
-    machines.forEach((m) => {
-      map[m.machine_id] = m.name;
-    });
-    return map;
+    machines.forEach((m) => (map[m.machine_id] = m.name));
+    return (id: string) => map[id] ?? id;
   }, [machines]);
 
-  const machineLabel = (machineId: string) => machineNameMap[machineId] ?? machineId;
-
-  const todayTopups = filtered.filter(
-    (t) => t.kind === "topup" && t.status === "completed" && isToday(t.created_at)
+  const byMachineRows = useMemo(
+    () => (machine === "all" ? rows : rows.filter((t) => t.machine_id === machine)),
+    [rows, machine]
   );
-  const todayReadings = filtered.filter(
-    (t) => t.kind === "reading" && t.status === "completed" && isToday(t.created_at)
-  );
-  const todayRevenue = todayTopups.reduce((sum, t) => sum + (t.amount ?? 0), 0);
-  const todayCash = todayTopups.filter((t) => t.payment_method === "cash");
-  const todayQr = todayTopups.filter((t) => t.payment_method === "qr");
+  // ยอดขาย = รายการรับเงิน, สถิติหัวข้อ = รายการเริ่มทำนาย (หัวข้อถูกเลือกหลังจ่ายเงิน)
+  const filtered = useMemo(() => byMachineRows.filter((t) => t.kind === "topup"), [byMachineRows]);
+  const readings = useMemo(() => byMachineRows.filter((t) => t.kind === "reading"), [byMachineRows]);
 
-  const paymentBreakdown = [
-    {
-      name: PAYMENT_METHOD_LABELS.cash,
-      value: todayCash.reduce((s, t) => s + (t.amount ?? 0), 0),
-    },
-    {
-      name: PAYMENT_METHOD_LABELS.qr,
-      value: todayQr.reduce((s, t) => s + (t.amount ?? 0), 0),
-    },
-  ];
+  const sum = (list: Transaction[]) =>
+    list.reduce((s, t) => s + (t.amount ?? 0), 0);
+  const cashRows = filtered.filter((t) => t.payment_method === "cash");
+  const qrRows = filtered.filter((t) => t.payment_method === "qr");
+  const total = sum(filtered);
+  const cash = sum(cashRows);
+  const qr = sum(qrRows);
+  const pct = (v: number) => (total > 0 ? Math.round((v / total) * 100) : 0);
 
-  const languageCounts = Object.entries(LANGUAGE_LABELS).map(([code, label]) => ({
-    name: label,
-    value: filtered.filter(
-      (t) => t.language === code && isToday(t.created_at)
-    ).length,
-  }));
+  const daily = useMemo(() => {
+    const first = since ?? (rows.length ? rows[rows.length - 1].created_at : new Date().toISOString());
+    const days = dayRange(first, until ? bkkDate(new Date(Date.parse(until) - 1)) : undefined);
+    const map = new Map(days.map((d) => [d, { date: d, cash: 0, qr: 0 }]));
+    filtered.forEach((t) => {
+      const e = map.get(bkkDate(t.created_at));
+      if (!e) return;
+      if (t.payment_method === "cash") e.cash += t.amount ?? 0;
+      else if (t.payment_method === "qr") e.qr += t.amount ?? 0;
+    });
+    return Array.from(map.values());
+  }, [filtered, since, until, rows]);
 
-  const revenueByDay = useMemo(() => {
-    const days: { day: string; revenue: number }[] = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const key = d.toLocaleDateString("th-TH", {
-        day: "2-digit",
-        month: "2-digit",
-      });
-      const dayRevenue = filtered
-        .filter(
-          (t) =>
-            t.kind === "topup" &&
-            t.status === "completed" &&
-            new Date(t.created_at).toDateString() === d.toDateString()
-        )
-        .reduce((sum, t) => sum + (t.amount ?? 0), 0);
-      days.push({ day: key, revenue: dayRevenue });
-    }
-    return days;
+  const byMachine = useMemo(() => {
+    const map = new Map<string, { id: string; cash: number; qr: number; count: number }>();
+    filtered.forEach((t) => {
+      const e = map.get(t.machine_id) ?? { id: t.machine_id, cash: 0, qr: 0, count: 0 };
+      if (t.payment_method === "cash") e.cash += t.amount ?? 0;
+      else if (t.payment_method === "qr") e.qr += t.amount ?? 0;
+      e.count += 1;
+      map.set(t.machine_id, e);
+    });
+    return Array.from(map.values()).sort((a, b) => b.cash + b.qr - (a.cash + a.qr));
   }, [filtered]);
+
+  const countBy = (
+    list: Transaction[],
+    key: (t: Transaction) => string | null | undefined
+  ) => {
+    const map = new Map<string, number>();
+    list.forEach((t) => {
+      const k = key(t);
+      if (k) map.set(k, (map.get(k) ?? 0) + 1);
+    });
+    return Array.from(map, ([name, value]) => ({ name, value })).sort(
+      (a, b) => b.value - a.value
+    );
+  };
+  const byLanguage = countBy(filtered, (t) =>
+    t.language ? LANGUAGE_LABELS[t.language] ?? t.language : "ไม่ระบุ"
+  );
+  const byTopic = countBy(readings, (t) => (t.topic ? TOPIC_LABELS[t.topic] ?? t.topic : null));
+
+  function exportCsv() {
+    const head = ["เวลา", "เครื่อง", "ช่องทาง", "จำนวนเงิน", "ภาษา"];
+    const esc = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
+    const lines = filtered.map((t) =>
+      [
+        formatDateTime(t.created_at),
+        machineName(t.machine_id),
+        t.payment_method ? PAYMENT_METHOD_LABELS[t.payment_method] : "",
+        (t.amount ?? 0).toFixed(2),
+        t.language ? LANGUAGE_LABELS[t.language] ?? t.language : "",
+      ]
+        .map(esc)
+        .join(",")
+    );
+    // BOM ให้ Excel อ่านภาษาไทยถูกต้อง
+    const blob = new Blob(["﻿" + [head.map(esc).join(","), ...lines].join("\r\n")], {
+      type: "text/csv;charset=utf-8",
+    });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `tarot-sales-${bkkDate(new Date())}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
 
   return (
     <div className="space-y-6">
-      {/* แถบตัวกรองตู้ + สถานะ realtime */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-slate-400">ตู้:</label>
-          <select
-            value={selectedMachine}
-            onChange={(e) => setSelectedMachine(e.target.value)}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-amber-500"
+      {/* หัวหน้า + ปุ่ม */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <h1 className="text-3xl font-bold text-slate-100">
+          🔮 แดชบอร์ดยอดขาย ตู้ไพ่ยิปซี
+        </h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={exportCsv}
+            className="rounded-xl bg-[#f0d27d] px-5 py-3 font-semibold text-[#1b1708] transition hover:bg-[#f5dc95]"
           >
-            <option value="all">ทุกตู้</option>
-            {machines.map((m) => (
-              <option key={m.machine_id} value={m.machine_id}>
-                {m.name} ({m.machine_id})
-              </option>
-            ))}
-          </select>
+            📥 Export Excel
+          </button>
+          <button onClick={load} className={darkBtn}>
+            รีเฟรช
+          </button>
+          <form action="/auth/logout" method="post">
+            <button type="submit" className={darkBtn}>
+              ออกจากระบบ
+            </button>
+          </form>
         </div>
-        <div className="flex items-center gap-2 text-xs text-slate-400">
-          <span
-            className={`h-2 w-2 rounded-full ${
-              connected ? "bg-emerald-400" : "bg-slate-600"
+      </div>
+
+      {/* แท็บ */}
+      <div className="flex gap-2 border-b border-[#23262e]">
+        {(
+          [
+            ["sales", "📊 ยอดขาย"],
+            ["license", "🔑 จัดการตู้ (License)"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setTab(id)}
+            className={`-mb-px border-b-2 px-5 py-3 text-base transition ${
+              tab === id
+                ? "border-[#eed587] font-bold text-[#eed587]"
+                : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
-          />
-          {connected ? "เชื่อมต่อ realtime แล้ว" : "กำลังเชื่อมต่อ..."}
-        </div>
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard
-          label="ยอดขายวันนี้"
-          value={THB.format(todayRevenue)}
-          sub={`${todayTopups.length} ธุรกรรม`}
-          icon="💰"
-          accent="amber"
-        />
-        <StatCard
-          label="ทำนายวันนี้"
-          value={String(todayReadings.length)}
-          sub="ครั้ง"
-          icon="🔮"
-          accent="violet"
-        />
-        <StatCard
-          label="เงินสด"
-          value={THB.format(todayCash.reduce((s, t) => s + (t.amount ?? 0), 0))}
-          sub={`${todayCash.length} รายการ`}
-          icon="💵"
-          accent="emerald"
-        />
-        <StatCard
-          label="QR Code"
-          value={THB.format(todayQr.reduce((s, t) => s + (t.amount ?? 0), 0))}
-          sub={`${todayQr.length} รายการ`}
-          icon="📱"
-          accent="sky"
-        />
-      </div>
-
-      {/* Charts */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="lg:col-span-2">
-          <RevenueChart data={revenueByDay} />
-        </div>
-        <BreakdownChart title="ช่องทางชำระเงิน (วันนี้)" data={paymentBreakdown} />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <BreakdownChart title="ภาษาที่เลือกใช้ (วันนี้)" data={languageCounts} />
-
-        {/* Realtime feed */}
-        <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4 sm:p-5 lg:col-span-2">
-          <h3 className="mb-3 text-sm font-medium text-slate-300">
-            ธุรกรรมล่าสุด (realtime)
-          </h3>
-          <div className="max-h-96 overflow-y-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="sticky top-0 bg-slate-900 text-xs text-slate-500">
-                <tr>
-                  <th className="pb-2 pr-2 font-normal">เวลา</th>
-                  <th className="pb-2 pr-2 font-normal">ประเภท</th>
-                  <th className="pb-2 pr-2 font-normal">ช่องทาง</th>
-                  <th className="pb-2 pr-2 font-normal">จำนวนเงิน</th>
-                  <th className="pb-2 pr-2 font-normal">ภาษา</th>
-                  <th className="pb-2 font-normal">ตู้</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800">
-                {filtered.slice(0, 50).map((t) => (
-                  <tr key={t.id} className="text-slate-200">
-                    <td className="py-2 pr-2 whitespace-nowrap text-slate-400">
-                      {formatTime(t.created_at)}
-                    </td>
-                    <td className="py-2 pr-2">
-                      {t.kind === "topup" ? (
-                        <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-400">
-                          รับเงิน
-                        </span>
-                      ) : (
-                        <span className="rounded-full bg-violet-500/10 px-2 py-0.5 text-xs text-violet-400">
-                          ทำนาย
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-2 text-slate-400">
-                      {t.payment_method
-                        ? PAYMENT_METHOD_LABELS[t.payment_method]
-                        : "—"}
-                    </td>
-                    <td className="py-2 pr-2 font-medium">
-                      {t.amount != null ? THB.format(t.amount) : "—"}
-                    </td>
-                    <td className="py-2 pr-2 text-slate-400">
-                      {t.language ? LANGUAGE_LABELS[t.language] : "—"}
-                    </td>
-                    <td className="py-2 text-slate-400">{machineLabel(t.machine_id)}</td>
-                  </tr>
-                ))}
-                {filtered.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="py-6 text-center text-slate-500">
-                      ยังไม่มีธุรกรรม
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+      {tab === "license" ? (
+        <LicenseTab />
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-3">
+            <select
+              value={period}
+              onChange={(e) => setPeriod(e.target.value)}
+              className={selectClass}
+            >
+              {PERIODS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <select
+              value={machine}
+              onChange={(e) => setMachine(e.target.value)}
+              className={selectClass}
+            >
+              <option value="all">ทุกเครื่อง</option>
+              {machines.map((m) => (
+                <option key={m.machine_id} value={m.machine_id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+            {period === "custom" && (
+              <>
+                <label className="flex items-center gap-2 text-sm text-slate-400">
+                  ตั้งแต่
+                  <input
+                    type="date"
+                    value={fromDate}
+                    max={today}
+                    onChange={(e) => e.target.value && setFromDate(e.target.value)}
+                    className={selectClass}
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-400">
+                  ถึง
+                  <input
+                    type="date"
+                    value={toDate}
+                    max={today}
+                    onChange={(e) => e.target.value && setToDate(e.target.value)}
+                    className={selectClass}
+                  />
+                </label>
+              </>
+            )}
+            {loading && (
+              <span className="self-center text-sm text-slate-500">กำลังโหลด...</span>
+            )}
+            {error && (
+              <span className="self-center text-sm text-red-400">โหลดข้อมูลไม่สำเร็จ: {error}</span>
+            )}
           </div>
-        </div>
-      </div>
+
+          <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+            <StatCard
+              label="ยอดขายรวม"
+              value={THB.format(total)}
+              sub={`${filtered.length} รายการ`}
+              color={COLORS.gold}
+            />
+            <StatCard
+              label="💵 เงินสด"
+              value={THB.format(cash)}
+              sub={`${pct(cash)}% ของยอดรวม`}
+              color={COLORS.green}
+            />
+            <StatCard
+              label="📱 QR"
+              value={THB.format(qr)}
+              sub={`${pct(qr)}% ของยอดรวม`}
+              color={COLORS.blue}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+            <ChartCard title="ยอดขายรายวัน (เงินสด vs QR)">
+              <DailyLineChart data={daily} />
+            </ChartCard>
+            <ChartCard title="สัดส่วนช่องทางชำระเงิน">
+              <ColoredPie
+                data={[
+                  { name: "เงินสด", value: cash },
+                  { name: "QR", value: qr },
+                ]}
+                colors={[COLORS.green, COLORS.blue]}
+              />
+            </ChartCard>
+          </div>
+
+          <ChartCard title="ยอดขายแยกตามเครื่อง">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="text-slate-400">
+                  <tr className="border-b border-[#23262e]">
+                    <th className="px-4 pb-3 font-normal">เครื่อง</th>
+                    <th className="px-4 pb-3 font-normal">เงินสด</th>
+                    <th className="px-4 pb-3 font-normal">QR</th>
+                    <th className="px-4 pb-3 font-normal">รวม</th>
+                    <th className="px-4 pb-3 font-normal">จำนวนรายการ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {byMachine.map((m) => (
+                    <tr key={m.id} className="border-b border-[#23262e] last:border-0">
+                      <td className="px-4 py-3.5">{machineName(m.id)}</td>
+                      <td className="px-4 py-3.5">{THB.format(m.cash)}</td>
+                      <td className="px-4 py-3.5">{THB.format(m.qr)}</td>
+                      <td className="px-4 py-3.5 font-bold">{THB.format(m.cash + m.qr)}</td>
+                      <td className="px-4 py-3.5">{m.count}</td>
+                    </tr>
+                  ))}
+                  {byMachine.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-8 text-center text-slate-500">
+                        ยังไม่มีข้อมูล
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </ChartCard>
+
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+            <ChartCard title="ประเภทคำทำนายที่เลือก">
+              <HBarChart
+                data={byTopic}
+                emptyText="ยังไม่มีข้อมูล (จะเริ่มสะสมเมื่อตู้ที่อัปเดตแล้วมีลูกค้าเลือกหัวข้อ)"
+              />
+            </ChartCard>
+            <ChartCard title="ภาษาที่เลือก">
+              <HBarChart data={byLanguage} />
+            </ChartCard>
+          </div>
+
+          <ChartCard title="รายการล่าสุด (สูงสุด 100 รายการ)">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="text-slate-400">
+                  <tr className="border-b border-[#23262e]">
+                    <th className="px-4 pb-3 font-normal">เวลา</th>
+                    <th className="px-4 pb-3 font-normal">เครื่อง</th>
+                    <th className="px-4 pb-3 font-normal">ช่องทาง</th>
+                    <th className="px-4 pb-3 font-normal">จำนวนเงิน</th>
+                    <th className="px-4 pb-3 font-normal">ภาษา</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.slice(0, 100).map((t) => (
+                    <tr key={t.id} className="border-b border-[#23262e] last:border-0">
+                      <td className="whitespace-nowrap px-4 py-3">{formatDateTime(t.created_at)}</td>
+                      <td className="px-4 py-3">{machineName(t.machine_id)}</td>
+                      <td className="px-4 py-3">
+                        {t.payment_method ? PAYMENT_METHOD_LABELS[t.payment_method] : "—"}
+                      </td>
+                      <td className="px-4 py-3">{THB.format(t.amount ?? 0)}</td>
+                      <td className="px-4 py-3">
+                        {t.language ? LANGUAGE_LABELS[t.language] ?? t.language : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                  {filtered.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-8 text-center text-slate-500">
+                        ยังไม่มีรายการ
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </ChartCard>
+        </>
+      )}
     </div>
   );
 }

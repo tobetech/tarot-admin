@@ -38,7 +38,10 @@ create table if not exists public.tarot_transactions (
   credits numeric(10, 2) not null default 1,
 
   -- ภาษาที่ลูกค้าเลือกอยู่ตอนทำธุรกรรมนี้
-  language text check (language in ('th', 'en', 'my', 'zh', 'km', 'lo')),
+  language text check (language in ('th', 'en', 'my', 'zh', 'km', 'lo', 'ko', 'ja', 'vi')),
+
+  -- หัวข้อคำทำนายที่ลูกค้าเลือก (ไม่บังคับ แสดงในกราฟ "ประเภทคำทำนายที่เลือก")
+  topic text,
 
   -- สถานะ (เผื่อ QR ที่ยังรอชำระ/หมดเวลา/ชำระสำเร็จ)
   status text not null default 'completed' check (status in ('pending', 'completed', 'failed', 'expired')),
@@ -104,3 +107,12 @@ values
   ('demo-machine-001', 'topup', 'qr', 20, 1, 'en', 'completed'),
   ('demo-machine-001', 'reading', null, null, 1, 'en', 'completed')
 on conflict do nothing;
+
+-- ----------------------------------------------------------------------------
+-- 6. สำหรับ database ที่สร้างไว้แล้ว (รันครั้งเดียวใน SQL Editor)
+--    เพิ่มภาษา ko/ja/vi ที่ตู้ใช้จริง และคอลัมน์ topic
+-- ----------------------------------------------------------------------------
+alter table public.tarot_transactions drop constraint if exists tarot_transactions_language_check;
+alter table public.tarot_transactions add constraint tarot_transactions_language_check
+  check (language in ('th', 'en', 'my', 'zh', 'km', 'lo', 'ko', 'ja', 'vi'));
+alter table public.tarot_transactions add column if not exists topic text;
