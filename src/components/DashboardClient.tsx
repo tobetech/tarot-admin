@@ -196,7 +196,7 @@ export function DashboardClient({ machines }: { machines: Machine[] }) {
       (a, b) => b.value - a.value
     );
   };
-  const byLanguage = countBy(filtered, (t) =>
+  const byLanguage = countBy(readings, (t) =>
     t.language ? LANGUAGE_LABELS[t.language] ?? t.language : "ไม่ระบุ"
   );
   const byTopic = countBy(readings, (t) => (t.topic ? TOPIC_LABELS[t.topic] ?? t.topic : null));
@@ -410,7 +410,7 @@ export function DashboardClient({ machines }: { machines: Machine[] }) {
                 emptyText="ยังไม่มีข้อมูล (จะเริ่มสะสมเมื่อตู้ที่อัปเดตแล้วมีลูกค้าเลือกหัวข้อ)"
               />
             </ChartCard>
-            <ChartCard title="ภาษาที่เลือก">
+            <ChartCard title="ภาษาที่เลือก (นับจากการทำนาย)">
               <HBarChart data={byLanguage} />
             </ChartCard>
           </div>
