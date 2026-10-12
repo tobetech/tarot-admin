@@ -27,6 +27,7 @@ import {
   HBarChart,
 } from "@/components/Charts";
 import { LicenseTab } from "@/components/LicenseTab";
+import { MachineStatus, type MachineStat } from "@/components/MachineStatus";
 
 const PERIODS = [
   { id: "7", label: "7 วันล่าสุด", days: 7 },
@@ -196,6 +197,15 @@ export function DashboardClient({ machines }: { machines: Machine[] }) {
       (a, b) => b.value - a.value
     );
   };
+  const machineStats = useMemo(() => {
+    const m: Record<string, MachineStat> = {};
+    rows.forEach((t) => {
+      const s = (m[t.machine_id] ??= { readings: 0, revenue: 0 });
+      if (t.kind === "reading") s.readings += 1;
+      else s.revenue += t.amount ?? 0;
+    });
+    return m;
+  }, [rows]);
   const byLanguage = countBy(readings, (t) =>
     t.language ? LANGUAGE_LABELS[t.language] ?? t.language : "ไม่ระบุ"
   );
@@ -277,6 +287,11 @@ export function DashboardClient({ machines }: { machines: Machine[] }) {
         <LicenseTab />
       ) : (
         <>
+          <MachineStatus
+            machines={machines}
+            stats={machineStats}
+            periodLabel={PERIODS.find((p) => p.id === period)?.label ?? ""}
+          />
           <div className="flex flex-wrap gap-3">
             <select
               value={period}

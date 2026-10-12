@@ -50,3 +50,12 @@ export function startOfDateIso(date: string): string {
 export function nextDayIso(date: string): string {
   return new Date(Date.parse(`${date}T00:00:00+07:00`) + 86400000).toISOString();
 }
+
+/** เช่น "เมื่อสักครู่", "5 นาทีที่แล้ว", "2 ชั่วโมงที่แล้ว", "3 วันที่แล้ว" */
+export function timeAgo(iso: string, nowMs: number = Date.now()): string {
+  const sec = Math.max(0, Math.round((nowMs - Date.parse(iso)) / 1000));
+  if (sec < 60) return "เมื่อสักครู่";
+  if (sec < 3600) return `${Math.floor(sec / 60)} นาทีที่แล้ว`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} ชั่วโมงที่แล้ว`;
+  return `${Math.floor(sec / 86400)} วันที่แล้ว`;
+}
